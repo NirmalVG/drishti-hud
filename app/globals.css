@@ -1,26 +1,58 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+@theme {
+  --color-saffron: #ff9933;
+  --color-teal: #45a29e;
+  --color-obsidian: rgba(11, 12, 16, 0.65);
+
+  --font-mono: "JetBrains Mono", "Fira Code", monospace;
+  --font-sans: "Inter", "Roboto", sans-serif;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+@layer base {
+  body {
+    @apply bg-black text-white overflow-hidden;
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+@layer utilities {
+  .hud-panel {
+    /* Changed bg-color-obsidian to bg-obsidian and border-color-saffron to border-saffron */
+    @apply bg-obsidian backdrop-blur-md border border-saffron/30 rounded-sm relative;
+  }
+
+  .hud-corner-tl {
+    /* Changed border-color-saffron to border-saffron */
+    @apply before:absolute before:top-0 before:left-0 before:w-3 before:h-3 before:border-t-2 before:border-l-2 before:border-saffron before:-mt-[1px] before:-ml-[1px];
+  }
+  .hud-corner-br {
+    /* Changed border-color-saffron to border-saffron */
+    @apply after:absolute after:bottom-0 after:right-0 after:w-3 after:h-3 after:border-b-2 after:border-r-2 after:border-saffron after:-mb-[1px] after:-mr-[1px];
+  }
+}
+
+@keyframes hud-glitch {
+  0% {
+    transform: translate(0);
+  }
+  20% {
+    transform: translate(-2px, 2px);
+  }
+  40% {
+    transform: translate(-2px, -2px);
+  }
+  60% {
+    transform: translate(2px, 2px);
+  }
+  80% {
+    transform: translate(2px, -2px);
+  }
+  100% {
+    transform: translate(0);
+  }
+}
+
+.animate-glitch {
+  animation: hud-glitch 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94) both infinite;
+  opacity: 0.8;
 }
