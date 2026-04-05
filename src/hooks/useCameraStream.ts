@@ -4,6 +4,7 @@ import { useState, useEffect, useRef } from "react"
 
 export function useCameraStream() {
   const [error, setError] = useState<string | null>(null)
+  const [isInitializing, setIsInitializing] = useState(true) // Added state
   const videoRef = useRef<HTMLVideoElement>(null)
 
   useEffect(() => {
@@ -11,7 +12,6 @@ export function useCameraStream() {
       try {
         const constraints = {
           video: {
-            // 'environment' forces the back camera on your S23
             facingMode: { ideal: "environment" },
             width: { ideal: 1280 },
             height: { ideal: 720 },
@@ -24,28 +24,30 @@ export function useCameraStream() {
         if (videoRef.current) {
           videoRef.current.srcObject = stream
 
-          // Check if we are actually using the front camera
-          // If so, we might need to flip it back via CSS
           const track = stream.getVideoTracks()[0]
           const settings = track.getSettings()
 
+          // Auto-flip for front vs back camera
           if (settings.facingMode === "user") {
-            videoRef.current.style.transform = "scaleX(-1)" // Mirror for selfie mode
+            videoRef.current.style.transform = "scaleX(-1)"
           } else {
-            videoRef.current.style.transform = "scaleX(1)" // Normal for back camera
+            videoRef.current.style.transform = "scaleX(1)"
           }
 
           videoRef.current.onloadedmetadata = () => {
             videoRef.current?.play()
+            setIsInitializing(false) // Camera successfully painted
           }
         }
       } catch (err: any) {
         setError("CAMERA_UNAVAILABLE: Check permissions.")
+        setIsInitializing(false) // Stop loading if failed
       }
     }
 
     setupCamera()
   }, [])
 
-  return { videoRef, error }
+  // Return the variable so CameraFeed can use it
+  return { videoRef, error, isInitializing }
 }
