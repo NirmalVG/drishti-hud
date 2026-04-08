@@ -7,53 +7,133 @@ import {
 // Global references to our AI models
 let detector: ObjectDetector | null = null
 let tracker: FaceLandmarker | null = null
+let detectorDelegate: "CPU" | "GPU" = "CPU"
+let trackerDelegate: "CPU" | "GPU" = "GPU"
+let vision: Awaited<ReturnType<typeof FilesetResolver.forVisionTasks>> | null = null
+let isReinitializing = false
+
+function getErrorMessage(error: unknown) {
+  if (error instanceof Error) {
+    return error.message
+  }
+
+  return String(error)
+}
+
+async function loadVision() {
+  if (vision) {
+    return vision
+  }
+
+  postMessage({
+    type: "LOG",
+    message: "Worker: Initializing via Next.js Bundler...",
+  })
+
+  vision = await FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm",
+  )
+
+  return vision
+}
+
+async function createEngines(
+  nextDetectorDelegate: "CPU" | "GPU",
+  nextTrackerDelegate: "CPU" | "GPU",
+) {
+  const visionTasks = await loadVision()
+
+  postMessage({
+    type: "LOG",
+    message: `Worker: Booting Vyuha Core on ${nextDetectorDelegate} and Biometrics on ${nextTrackerDelegate}...`,
+  })
+
+  const nextDetector = await ObjectDetector.createFromOptions(visionTasks, {
+    baseOptions: {
+      modelAssetPath: "/models/efficientdet_lite0.tflite",
+      delegate: nextDetectorDelegate,
+    },
+    runningMode: "VIDEO",
+    scoreThreshold: 0.25,
+  })
+
+  postMessage({
+    type: "LOG",
+    message: `Worker: Vyuha Core online on ${nextDetectorDelegate}. Booting Biometrics on ${nextTrackerDelegate}...`,
+  })
+
+  const nextTracker = await FaceLandmarker.createFromOptions(visionTasks, {
+    baseOptions: {
+      modelAssetPath: "/models/face_landmarker.task",
+      delegate: nextTrackerDelegate,
+    },
+    runningMode: "VIDEO",
+    numFaces: 1,
+  })
+
+  detector = nextDetector
+  tracker = nextTracker
+  detectorDelegate = nextDetectorDelegate
+  trackerDelegate = nextTrackerDelegate
+}
 
 async function init() {
   try {
+    await createEngines("CPU", "GPU")
     postMessage({
-      type: "LOG",
-      message: "Worker: Initializing via Next.js Bundler...",
+      type: "READY",
+      delegate: { detector: "CPU", tracker: "GPU" },
     })
+  } catch (error: unknown) {
+    const message = getErrorMessage(error)
 
-    // 1. Load the WebAssembly Engine (Using jsdelivr as Webpack handles the JS natively now)
-    const vision = await FilesetResolver.forVisionTasks(
-      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm",
-    )
-
-    postMessage({
-      type: "LOG",
-      message: "Worker: WASM loaded. Booting Vyuha Core...",
-    })
-
-    // 2. Initialize Object Detection
-    detector = await ObjectDetector.createFromOptions(vision, {
-      baseOptions: {
-        modelAssetPath: "/models/efficientdet_lite0.tflite",
-        delegate: "GPU", // Hardware acceleration
-      },
-      runningMode: "VIDEO",
-      scoreThreshold: 0.25, // Lowered to 25% confidence so it easily picks up objects
-    })
+    if (trackerDelegate === "GPU") {
+      postMessage({
+        type: "LOG",
+        message: `Worker: GPU biometrics init failed (${message}). Falling back to CPU biometrics.`,
+      })
+      await createEngines("CPU", "CPU")
+      postMessage({
+        type: "READY",
+        delegate: { detector: "CPU", tracker: "CPU" },
+      })
+      return
+    }
 
     postMessage({
+      type: "ERROR",
+      message: `AI Engine Crash: ${message}`,
+    })
+  }
+}
+
+async function fallbackToCpu(reason: string) {
+  if (
+    (detectorDelegate === "CPU" && trackerDelegate === "CPU") ||
+    isReinitializing
+  ) {
+    return
+  }
+
+  isReinitializing = true
+
+  try {
+    postMessage({
       type: "LOG",
-      message: "Worker: Vyuha Core online. Booting Biometrics...",
+      message: `Worker: GPU inference failed (${reason}). Switching all inference to CPU.`,
     })
-
-    // 3. Initialize Face Tracking
-    tracker = await FaceLandmarker.createFromOptions(vision, {
-      baseOptions: {
-        modelAssetPath: "/models/face_landmarker.task",
-        delegate: "GPU", // Hardware acceleration
-      },
-      runningMode: "VIDEO",
-      numFaces: 1,
+    await createEngines("CPU", "CPU")
+    postMessage({
+      type: "READY",
+      delegate: { detector: "CPU", tracker: "CPU" },
     })
-
-    // 4. Signal the Main Thread that optics are online
-    postMessage({ type: "READY" })
-  } catch (error: any) {
-    postMessage({ type: "ERROR", message: `AI Engine Crash: ${error.message}` })
+  } catch (error: unknown) {
+    postMessage({
+      type: "ERROR",
+      message: `CPU fallback failed: ${getErrorMessage(error)}`,
+    })
+  } finally {
+    isReinitializing = false
   }
 }
 
@@ -65,8 +145,18 @@ self.onmessage = async (e: MessageEvent) => {
     const { imageBitmap, timestamp } = e.data
 
     // If AI isn't ready, silently discard the frame to prevent memory leaks
-    if (!detector || !tracker) {
+    if (!detector || !tracker || isReinitializing) {
       imageBitmap.close()
+      return
+    }
+
+    if (
+      !imageBitmap ||
+      imageBitmap.width <= 0 ||
+      imageBitmap.height <= 0 ||
+      !Number.isFinite(timestamp)
+    ) {
+      imageBitmap?.close?.()
       return
     }
 
@@ -77,8 +167,18 @@ self.onmessage = async (e: MessageEvent) => {
 
       // Send the telemetry back to the UI
       postMessage({ type: "RESULT", detections, faces })
-    } catch (err: any) {
-      postMessage({ type: "ERROR", message: `Inference Crash: ${err.message}` })
+    } catch (error: unknown) {
+      const message = getErrorMessage(error)
+
+      if (message.toLowerCase().includes("divide by zero")) {
+        await fallbackToCpu(message)
+        return
+      }
+
+      postMessage({
+        type: "ERROR",
+        message: `Inference Crash: ${message}`,
+      })
     } finally {
       // CRITICAL: Always close the bitmap or the mobile browser will crash from OOM (Out of Memory)
       imageBitmap.close()

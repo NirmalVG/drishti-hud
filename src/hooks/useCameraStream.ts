@@ -4,10 +4,15 @@ import { useState, useEffect, useRef } from "react"
 
 export function useCameraStream() {
   const [error, setError] = useState<string | null>(null)
-  const [isInitializing, setIsInitializing] = useState(true) // Added state
+  const [isInitializing, setIsInitializing] = useState(true)
+  const [isMirrored, setIsMirrored] = useState(false)
   const videoRef = useRef<HTMLVideoElement>(null)
+  const streamRef = useRef<MediaStream | null>(null)
 
   useEffect(() => {
+    let isCancelled = false
+    let videoElement: HTMLVideoElement | null = null
+
     async function setupCamera() {
       try {
         const constraints = {
@@ -20,34 +25,53 @@ export function useCameraStream() {
         }
 
         const stream = await navigator.mediaDevices.getUserMedia(constraints)
+        streamRef.current = stream
 
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream
+        if (isCancelled || !videoRef.current) {
+          stream.getTracks().forEach((track) => track.stop())
+          return
+        }
 
-          const track = stream.getVideoTracks()[0]
-          const settings = track.getSettings()
+        videoElement = videoRef.current
+        videoElement.srcObject = stream
 
-          // Auto-flip for front vs back camera
-          if (settings.facingMode === "user") {
-            videoRef.current.style.transform = "scaleX(-1)"
-          } else {
-            videoRef.current.style.transform = "scaleX(1)"
-          }
+        const track = stream.getVideoTracks()[0]
+        const settings = track?.getSettings()
+        const mirrored = settings?.facingMode === "user"
 
-          videoRef.current.onloadedmetadata = () => {
-            videoRef.current?.play()
-            setIsInitializing(false) // Camera successfully painted
+        setIsMirrored(mirrored)
+        videoElement.style.transform = mirrored ? "scaleX(-1)" : "scaleX(1)"
+
+        videoElement.onloadedmetadata = async () => {
+          try {
+            await videoElement?.play()
+          } finally {
+            if (!isCancelled) {
+              setIsInitializing(false)
+            }
           }
         }
-      } catch (err: any) {
-        setError("CAMERA_UNAVAILABLE: Check permissions.")
-        setIsInitializing(false) // Stop loading if failed
+      } catch {
+        if (!isCancelled) {
+          setError("CAMERA_UNAVAILABLE: Check permissions.")
+          setIsInitializing(false)
+        }
       }
     }
 
     setupCamera()
+
+    return () => {
+      isCancelled = true
+      videoElement?.pause()
+      if (videoElement) {
+        videoElement.onloadedmetadata = null
+        videoElement.srcObject = null
+      }
+      streamRef.current?.getTracks().forEach((track) => track.stop())
+      streamRef.current = null
+    }
   }, [])
 
-  // Return the variable so CameraFeed can use it
-  return { videoRef, error, isInitializing }
+  return { videoRef, error, isInitializing, isMirrored }
 }

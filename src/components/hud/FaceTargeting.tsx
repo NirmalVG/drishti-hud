@@ -1,19 +1,27 @@
 "use client"
 
-import { RefObject } from "react"
 import { FaceLandmarkerResult } from "@mediapipe/tasks-vision"
+import {
+  projectNormalizedBoxToViewport,
+  VideoOverlayMetrics,
+} from "@/lib/utils/videoOverlay"
 
 interface FaceTargetingProps {
   faces: FaceLandmarkerResult | null
-  videoRef: RefObject<HTMLVideoElement | null>
+  isMirrored: boolean
+  overlayMetrics: VideoOverlayMetrics | null
 }
 
-export default function FaceTargeting({ faces, videoRef }: FaceTargetingProps) {
+export default function FaceTargeting({
+  faces,
+  isMirrored,
+  overlayMetrics,
+}: FaceTargetingProps) {
   if (
     !faces ||
     !faces.faceLandmarks ||
     faces.faceLandmarks.length === 0 ||
-    !videoRef.current
+    !overlayMetrics
   ) {
     return null
   }
@@ -30,17 +38,31 @@ export default function FaceTargeting({ faces, videoRef }: FaceTargetingProps) {
         const minY = Math.min(...ys)
         const maxY = Math.max(...ys)
 
-        // Convert to percentages, adding a little padding so it frames the head nicely
-        const top = `${Math.max(0, minY - 0.05) * 100}%`
-        const left = `${Math.max(0, minX - 0.05) * 100}%`
-        const width = `${(maxX - minX + 0.1) * 100}%`
-        const height = `${(maxY - minY + 0.1) * 100}%`
+        const projectedBox = projectNormalizedBoxToViewport(
+          overlayMetrics,
+          {
+            x: Math.max(0, minX - 0.05),
+            y: Math.max(0, minY - 0.05),
+            width: Math.min(1, maxX - minX + 0.1),
+            height: Math.min(1, maxY - minY + 0.1),
+          },
+          isMirrored,
+        )
+
+        if (!projectedBox) {
+          return null
+        }
 
         return (
           <div
             key={`face-${index}`}
             className="absolute border-[1px] border-[#45A29E] bg-[#45A29E]/5 shadow-[0_0_20px_rgba(69,162,158,0.2)] transition-all duration-75 pointer-events-none z-10 flex items-center justify-center"
-            style={{ top, left, width, height }}
+            style={{
+              top: projectedBox.top,
+              left: projectedBox.left,
+              width: projectedBox.width,
+              height: projectedBox.height,
+            }}
           >
             {/* High-tech Teal Reticle Corners */}
             <div className="absolute top-0 left-0 w-6 h-6 border-t-2 border-l-2 border-[#45A29E]" />

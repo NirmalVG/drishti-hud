@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useState } from "react"
+import { Detection } from "@mediapipe/tasks-vision"
 
 // --- SYSTEM HOOKS ---
 import { useCameraStream } from "@/hooks/useCameraStream"
@@ -8,6 +9,11 @@ import { useDrishtiWorker } from "@/hooks/useDrishtiWorker"
 import { useVoiceAssistant } from "@/hooks/useVoiceAssistant"
 import { useTacticalAlerts } from "@/hooks/useTacticalAlerts"
 import { useAutoLog } from "@/hooks/useAutoLog" // Persistent Dexie Database
+import {
+  getVideoOverlayMetrics,
+  projectPixelBoxToViewport,
+  VideoOverlayMetrics,
+} from "@/lib/utils/videoOverlay"
 
 // --- UI COMPONENTS ---
 import TopHeader from "@/components/layout/TopHeader"
@@ -20,11 +26,13 @@ import YantraDashboard from "@/components/hud/YantraDashboard"
 import FaceTargeting from "@/components/hud/FaceTargeting"
 
 export default function DrishtiHUD() {
-  const [mounted, setMounted] = useState(false)
   const [activeView, setActiveView] = useState("TELEMETRY")
+  const [overlayMetrics, setOverlayMetrics] = useState<VideoOverlayMetrics | null>(
+    null,
+  )
 
   // 1. Initialize Optics Feed (Auto-flips for S23 Back Camera vs HP WebCam)
-  const { videoRef, error: cameraError } = useCameraStream()
+  const { videoRef, error: cameraError, isMirrored } = useCameraStream()
 
   // 2. Initialize the Native Webpack AI Worker
   const { detections, faces, isReady } = useDrishtiWorker(videoRef)
@@ -37,12 +45,40 @@ export default function DrishtiHUD() {
   const { isListening, transcript, aiResponse, startListening } =
     useVoiceAssistant(detections, faces)
 
-  // Prevent hydration mismatch on initial render
   useEffect(() => {
-    setMounted(true)
-  }, [])
+    let animationFrameId: number | null = null
 
-  if (!mounted) return null
+    const updateMetrics = () => {
+      const nextMetrics = getVideoOverlayMetrics(videoRef.current)
+
+      setOverlayMetrics((currentMetrics) => {
+        if (
+          currentMetrics &&
+          nextMetrics &&
+          currentMetrics.left === nextMetrics.left &&
+          currentMetrics.top === nextMetrics.top &&
+          currentMetrics.width === nextMetrics.width &&
+          currentMetrics.height === nextMetrics.height &&
+          currentMetrics.videoWidth === nextMetrics.videoWidth &&
+          currentMetrics.videoHeight === nextMetrics.videoHeight
+        ) {
+          return currentMetrics
+        }
+
+        return nextMetrics
+      })
+
+      animationFrameId = window.requestAnimationFrame(updateMetrics)
+    }
+
+    updateMetrics()
+
+    return () => {
+      if (animationFrameId !== null) {
+        window.cancelAnimationFrame(animationFrameId)
+      }
+    }
+  }, [videoRef])
 
   const isDashboardOpen = activeView === "YANTRA"
 
@@ -112,47 +148,6 @@ export default function DrishtiHUD() {
         {/* Central Spatial Compass */}
         <CenterReticle />
 
-        {/* --- AI TARGETING VISUALS --- */}
-        <FaceTargeting faces={faces} videoRef={videoRef} />
-
-        {/* Object Detection Bounding Boxes */}
-        {detections?.map((det: any, index: number) => {
-          // Bulletproof check: Ensure video dimensions exist before rendering boxes
-          if (
-            !videoRef.current ||
-            !videoRef.current.videoWidth ||
-            !videoRef.current.videoHeight
-          )
-            return null
-
-          const vw = videoRef.current.videoWidth
-          const vh = videoRef.current.videoHeight
-
-          // Convert raw MediaPipe coordinates to screen percentages
-          const top = `${(det.boundingBox.originY / vh) * 100}%`
-          const left = `${(det.boundingBox.originX / vw) * 100}%`
-          const width = `${(det.boundingBox.width / vw) * 100}%`
-          const height = `${(det.boundingBox.height / vh) * 100}%`
-
-          return (
-            <div
-              key={`obj-${index}`}
-              className="absolute border-[1.5px] border-[#FF9933] bg-[#FF9933]/10 shadow-[0_0_15px_rgba(255,153,51,0.3)] transition-all duration-75 pointer-events-none"
-              style={{ top, left, width, height, zIndex: 50 }}
-            >
-              {/* Tactical Corners */}
-              <div className="absolute top-0 left-0 w-3 h-3 border-t-2 border-l-2 border-[#FF9933] -mt-[2px] -ml-[2px]" />
-              <div className="absolute bottom-0 right-0 w-3 h-3 border-b-2 border-r-2 border-[#FF9933] -mb-[2px] -mr-[2px]" />
-
-              {/* Target Label with Confidence Score */}
-              <div className="absolute -top-5 left-0 bg-[#FF9933] text-black text-[9px] font-bold px-2 py-0.5 whitespace-nowrap uppercase tracking-tighter shadow-md">
-                {det.categories[0].categoryName} [
-                {Math.round(det.categories[0].score * 100)}%]
-              </div>
-            </div>
-          )
-        })}
-
         {/* Interaction & Audio Dock */}
         <BottomConsole
           objectCount={detections?.length || 0}
@@ -161,6 +156,56 @@ export default function DrishtiHUD() {
           aiResponse={aiResponse}
           onMicClick={startListening}
         />
+      </div>
+
+      <div className="absolute inset-0 z-30 pointer-events-none">
+        <FaceTargeting
+          faces={faces}
+          isMirrored={isMirrored}
+          overlayMetrics={overlayMetrics}
+        />
+
+        {detections?.map((det: Detection, index: number) => {
+          if (!overlayMetrics || !det.boundingBox || det.categories.length === 0) {
+            return null
+          }
+
+          const projectedBox = projectPixelBoxToViewport(
+            overlayMetrics,
+            {
+              x: det.boundingBox.originX,
+              y: det.boundingBox.originY,
+              width: det.boundingBox.width,
+              height: det.boundingBox.height,
+            },
+            isMirrored,
+          )
+
+          if (!projectedBox) {
+            return null
+          }
+
+          return (
+            <div
+              key={`obj-${index}`}
+              className="absolute border-[1.5px] border-[#FF9933] bg-[#FF9933]/10 shadow-[0_0_15px_rgba(255,153,51,0.3)] transition-all duration-75"
+              style={{
+                top: projectedBox.top,
+                left: projectedBox.left,
+                width: projectedBox.width,
+                height: projectedBox.height,
+              }}
+            >
+              <div className="absolute top-0 left-0 w-3 h-3 border-t-2 border-l-2 border-[#FF9933] -mt-[2px] -ml-[2px]" />
+              <div className="absolute bottom-0 right-0 w-3 h-3 border-b-2 border-r-2 border-[#FF9933] -mb-[2px] -mr-[2px]" />
+
+              <div className="absolute -top-5 left-0 bg-[#FF9933] text-black text-[9px] font-bold px-2 py-0.5 whitespace-nowrap uppercase tracking-tighter shadow-md">
+                {det.categories[0].categoryName} [
+                {Math.round(det.categories[0].score * 100)}%]
+              </div>
+            </div>
+          )
+        })}
       </div>
 
       {/* --- LAYER 4: SETTINGS DASHBOARD --- */}

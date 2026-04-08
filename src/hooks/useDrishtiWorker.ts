@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useRef } from "react"
+import { useEffect, useRef, useState } from "react"
 
 export function useDrishtiWorker(
   videoRef: React.RefObject<HTMLVideoElement | null>,
@@ -8,53 +8,85 @@ export function useDrishtiWorker(
   const [results, setResults] = useState({ detections: [], faces: null })
   const [isReady, setIsReady] = useState(false)
   const workerRef = useRef<Worker | null>(null)
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const animationFrameRef = useRef<number | null>(null)
   const isBusy = useRef(false)
 
-  // NEW: A dedicated canvas to guarantee pixel extraction
-  const canvasRef = useRef<HTMLCanvasElement | null>(null)
-
   useEffect(() => {
-    // 1. Setup the invisible canvas once
     if (!canvasRef.current && typeof document !== "undefined") {
       canvasRef.current = document.createElement("canvas")
     }
 
-    workerRef.current = new Worker(
+    const worker = new Worker(
       new URL("../workers/drishti.worker.ts", import.meta.url),
       { type: "module" },
     )
-    workerRef.current.postMessage({ type: "INIT" })
 
-    workerRef.current.onmessage = (e) => {
+    workerRef.current = worker
+    worker.postMessage({ type: "INIT" })
+
+    worker.onmessage = (e) => {
       if (e.data.type === "READY") {
-        console.log("🟢 VYUHA CORE: SYSTEM STABLE & READY")
+        console.log("VYUHA CORE: SYSTEM STABLE & READY")
         setIsReady(true)
-      } else if (e.data.type === "RESULT") {
+        return
+      }
+
+      if (e.data.type === "RESULT") {
         setResults({
           detections: e.data.detections?.detections || [],
           faces: e.data.faces,
         })
         isBusy.current = false
-      } else if (e.data.type === "ERROR") {
-        console.error("🔴 VYUHA CORE CRITICAL ERROR:", e.data.message)
+        return
+      }
+
+      if (e.data.type === "ERROR") {
+        console.error("VYUHA CORE CRITICAL ERROR:", e.data.message)
+        isBusy.current = false
       }
     }
 
+    return () => {
+      if (animationFrameRef.current !== null) {
+        cancelAnimationFrame(animationFrameRef.current)
+        animationFrameRef.current = null
+      }
+
+      worker.terminate()
+      workerRef.current = null
+      isBusy.current = false
+      setIsReady(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!isReady) {
+      return
+    }
+
+    let isCancelled = false
+
     const loop = async () => {
+      if (isCancelled) {
+        return
+      }
+
       const video = videoRef.current
       const canvas = canvasRef.current
 
-      // Ensure video is actually playing and has dimensions
       if (
         video &&
         video.readyState >= 2 &&
         video.videoWidth > 0 &&
-        isReady &&
+        video.videoHeight > 0 &&
         !isBusy.current &&
         canvas
       ) {
-        // 2. Force the video dimensions onto the canvas
-        if (canvas.width !== video.videoWidth) {
+        if (
+          canvas.width !== video.videoWidth ||
+          canvas.height !== video.videoHeight
+        ) {
           canvas.width = video.videoWidth
           canvas.height = video.videoHeight
         }
@@ -63,11 +95,15 @@ export function useDrishtiWorker(
 
         if (ctx) {
           try {
-            // 3. Explicitly paint the video frame to the canvas
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
-
-            // 4. Extract the pixels from the canvas, NOT the video tag
             const imageBitmap = await createImageBitmap(canvas)
+
+            if (imageBitmap.width === 0 || imageBitmap.height === 0) {
+              imageBitmap.close()
+              isBusy.current = false
+              animationFrameRef.current = requestAnimationFrame(loop)
+              return
+            }
 
             isBusy.current = true
             workerRef.current?.postMessage(
@@ -78,18 +114,28 @@ export function useDrishtiWorker(
               },
               [imageBitmap],
             )
-          } catch (err) {
+          } catch {
             console.warn("Pixel extraction failed, skipping frame.")
+            isBusy.current = false
           }
         }
       }
-      // Run the loop again
-      requestAnimationFrame(loop)
+
+      animationFrameRef.current = requestAnimationFrame(loop)
     }
 
-    if (isReady) loop()
+    loop()
 
-    return () => workerRef.current?.terminate()
+    return () => {
+      isCancelled = true
+
+      if (animationFrameRef.current !== null) {
+        cancelAnimationFrame(animationFrameRef.current)
+        animationFrameRef.current = null
+      }
+
+      isBusy.current = false
+    }
   }, [isReady, videoRef])
 
   return { ...results, isReady }
